@@ -1,0 +1,441 @@
+networks:
+  frontend:
+    driver: ${NETWORKS_DRIVER}
+  backend:
+    driver: ${NETWORKS_DRIVER}
+
+volumes:
+  mysql:
+    driver: ${VOLUMES_DRIVER}
+  mssql:
+    driver: ${VOLUMES_DRIVER}
+  postgres:
+    driver: ${VOLUMES_DRIVER}
+  memcached:
+    driver: ${VOLUMES_DRIVER}
+  redis:
+    driver: ${VOLUMES_DRIVER}
+  mariadb:
+    driver: ${VOLUMES_DRIVER}
+  mongo:
+    driver: ${VOLUMES_DRIVER}
+  minio:
+    driver: ${VOLUMES_DRIVER}
+  meilisearch:
+    driver: ${VOLUMES_DRIVER}
+  elasticsearch:
+    driver: ${VOLUMES_DRIVER}
+
+services:
+### Certbot #########################################
+    certbot:
+      build:
+        context: ./app/certbot
+      volumes:
+        - ./data/certbot/certs/:/var/certs
+        - ./app/certbot/letsencrypt/:/var/www/letsencrypt
+      environment:
+        - CN="fake.domain.com"
+        - EMAIL="fake.email@gmail.com"
+      networks:
+        - frontend
+
+### Dejavu ##############################################
+    dejavu:
+      build:
+        context: ./app/dejavu
+      ports:
+        - "${DEJAVU_HTTP_PORT}:1358"
+      depends_on:
+        - elasticsearch
+      networks:
+        - frontend
+        - backend
+
+### DOCKER-REGISTRY ################################################
+    docker-registry:
+      build:
+        context: ./app/docker-registry
+      volumes:
+        - /etc/localtime:/etc/localtime:ro
+        - ${DATA_PATH_HOST}/docker-registry:/var/lib/registry
+      ports:
+        - "${DOCKER_REGISTRY_PORT}:5000"
+      networks:
+        - backend
+
+### MeiliSearch ##########################################
+    meilisearch:
+      image: getmeili/meilisearch:latest
+      volumes:
+        - ${DATA_PATH_HOST}/meilisearch:/data.ms
+      ports:
+        - "${MEILISEARCH_HOST_PORT}:7700"
+      networks:
+        - frontend
+        - backend
+
+### ElasticSearch ########################################
+    elasticsearch:
+      build:
+        context: ./app/elasticsearch
+        args:
+          - ELK_VERSION=${ELK_VERSION}
+      volumes:
+        - ${DATA_PATH_HOST}/elasticsearch:/usr/share/elasticsearch/data
+      environment:
+        - cluster.name=fsdock-cluster
+        - node.name=fsdock-node
+        - bootstrap.memory_lock=true
+        - xpack.security.enabled=false
+        - xpack.security.transport.ssl.enabled=false
+        - indices.id_field_data.enabled=true
+        - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+        - cluster.initial_master_nodes=fsdock-node
+      ulimits:
+        memlock:
+          soft: -1
+          hard: -1
+        nofile:
+          soft: 65536
+          hard: 65536
+      ports:
+        - "${ELASTICSEARCH_HOST_HTTP_PORT}:9200"
+        - "${ELASTICSEARCH_HOST_TRANSPORT_PORT}:9300"
+      networks:
+        - frontend
+        - backend
+
+### Grafana ################################################
+    grafana:
+      build:
+        context: ./app/grafana
+      volumes:
+        - ${DATA_PATH_HOST}/grafana:/var/lib/grafana
+      ports:
+        - "${GRAFANA_PORT}:3000"
+      networks:
+        - backend
+
+### Logstash ##############################################
+    logstash:
+      build:
+        context: ./app/logstash
+        args:
+          - ELK_VERSION=${ELK_VERSION}
+      volumes:
+        - './app/logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml'
+        - './app/logstash/pipeline:/usr/share/logstash/pipeline'
+      ports:
+        - '5001:5001'
+      environment:
+        LS_JAVA_OPTS: '-Xmx1g -Xms1g'
+      env_file:
+        - .env
+      networks:
+        - frontend
+        - backend
+      depends_on:
+        - elasticsearch
+
+### Kibana ##############################################
+    kibana:
+      build:
+        context: ./app/kibana
+        args:
+          - ELK_VERSION=${ELK_VERSION}
+      ports:
+        - "${KIBANA_HTTP_PORT}:5601"
+      depends_on:
+        - elasticsearch
+      networks:
+        - frontend
+        - backend
+
+### Minio ################################################
+    minio:
+      build: ./app/minio
+      volumes:
+        - ${DATA_PATH_HOST}/minio/data:/export
+        - ${DATA_PATH_HOST}/minio/config:/root/.minio
+      ports:
+        - "${MINIO_PORT}:9000"
+        - "${MINIO_CONSOLE_PORT}:9001"
+      environment:
+        - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+        - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      networks:
+        - frontend
+        - backend
+
+### MongoDB ##############################################
+    mongo:
+      build: ./app/mongo
+      ports:
+        - "${MONGODB_PORT}:27017"
+      environment:
+        - MONGO_INITDB_ROOT_USERNAME=${MONGO_USERNAME}
+        - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD}
+      volumes:
+        - ${DATA_PATH_HOST}/mongo:/data/db
+        - ${DATA_PATH_HOST}/mongo_config:/data/configdb
+      networks:
+        - backend
+
+### MySQL ################################################
+    mysql:
+      build:
+        context: ./app/mysql
+        args:
+          - MYSQL_VERSION=${MYSQL_VERSION}
+      environment:
+        - MYSQL_DATABASE=${MYSQL_DATABASE}
+        - MYSQL_USER=${MYSQL_USER}
+        - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+        - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+        - TZ=${WORKSPACE_TIMEZONE}
+      volumes:
+        - ${DATA_PATH_HOST}/mysql:/var/lib/mysql
+        - ${MYSQL_ENTRYPOINT_INITDB}:/docker-entrypoint-initdb.d
+      ports:
+        - "${MYSQL_PORT}:3306"
+      networks:
+        - backend
+
+### NGINX Server #########################################
+    nginx:
+      build:
+        context: ./app/nginx
+        args:
+          - CHANGE_SOURCE=${CHANGE_SOURCE}
+          - http_proxy
+          - https_proxy
+          - no_proxy
+      volumes:
+        - ${APP_CODE_PATH_HOST}:${APP_CODE_PATH_CONTAINER}${APP_CODE_CONTAINER_FLAG}
+        - ${NGINX_HOST_LOG_PATH}:/var/log/nginx
+        - ${NGINX_SITES_PATH}:/etc/nginx/sites-available
+        - ${NGINX_SSL_PATH}:/etc/nginx/ssl
+      ports:
+        - "${NGINX_HOST_HTTP_PORT}:80"
+        - "${NGINX_HOST_HTTPS_PORT}:443"
+      networks:
+        - frontend
+        - backend
+
+### Portainer ################################################
+    portainer:
+      build:
+        context: ./app/portainer
+      volumes:
+        - ${DATA_PATH_HOST}/portainer_data:/data
+        - /var/run/docker.sock:/var/run/docker.sock
+      extra_hosts:
+        - "dockerhost:${DOCKER_HOST_IP}"
+      ports:
+        - 9010:9000
+      networks:
+        - backend
+
+### PostgreSQL ###########################################
+    postgres:
+      build:
+        context: ./app/postgres
+        args:
+          - POSTGRES_VERSION=${POSTGRES_VERSION}
+      volumes:
+        - ${DATA_PATH_HOST}/postgres:/var/lib/postgresql/data
+        - ${POSTGRES_ENTRYPOINT_INITDB}:/docker-entrypoint-initdb.d
+      ports:
+        - "${POSTGRES_PORT}:5432"
+      environment:
+        - POSTGRES_DB=${POSTGRES_DB}
+        - POSTGRES_USER=${POSTGRES_USER}
+        - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      networks:
+        - backend
+
+### PostgreSQL PostGis ###################################
+    postgres-postgis:
+      build:
+        context: ./app/postgres-postgis
+        args:
+          - POSTGIS_VERSION=${POSTGIS_VERSION}
+          - INSTALL_PGSQL_HTTP_FOR_POSTGIS13=${POSTGIS_INSTALL_PGSQL_HTTP_FOR_POSTGIS13}
+      volumes:
+        - ${DATA_PATH_HOST}/postgres:/var/lib/postgresql/data
+      ports:
+        - "${POSTGRES_PORT}:5432"
+      environment:
+        - POSTGRES_DB=${POSTGRES_DB}
+        - POSTGRES_USER=${POSTGRES_USER}
+        - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      networks:
+        - backend
+
+### RabbitMQ #############################################
+    rabbitmq:
+      build: ./app/rabbitmq
+      ports:
+        - "${RABBITMQ_NODE_HOST_PORT}:5672"
+        - "${RABBITMQ_MANAGEMENT_HTTP_HOST_PORT}:15672"
+        - "${RABBITMQ_MANAGEMENT_HTTPS_HOST_PORT}:15671"
+        - "${RABBITMQ_WEB_STOMP_HOST_PORT}:15674"
+      privileged: true
+      hostname: fsdock-rabbitmq
+      volumes:
+        - ${DATA_PATH_HOST}/rabbitmq:/var/lib/rabbitmq
+        - ./app/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf
+        - ./app/rabbitmq/management_agent.disable_metrics_collector.conf:/etc/rabbitmq/conf.d/management_agent.disable_metrics_collector.conf
+      networks:
+        - backend
+
+### Redis ################################################
+    redis:
+      build: ./app/redis
+      volumes:
+        - ${DATA_PATH_HOST}/redis:/data
+      command: --requirepass ${REDIS_PASSWORD}
+      ports:
+        - "${REDIS_PORT}:6379"
+      networks:
+        - backend
+
+### Redis Cluster ##########################################
+    redis-cluster:
+      build: ./app/redis-cluster
+      ports:
+        - "${REDIS_CLUSTER_PORT_RANGE}:7000-7005"
+      networks:
+        - backend
+
+### Solr ################################################
+    solr:
+      build:
+        context: ./app/solr
+        args:
+          - SOLR_VERSION=${SOLR_VERSION}
+          - SOLR_DATAIMPORTHANDLER_MYSQL=${SOLR_DATAIMPORTHANDLER_MYSQL}
+          - SOLR_DATAIMPORTHANDLER_MSSQL=${SOLR_DATAIMPORTHANDLER_MSSQL}
+      volumes:
+        - ${DATA_PATH_HOST}/solr:/opt/solr/server/solr/mycores
+      ports:
+        - "${SOLR_PORT}:8983"
+      networks:
+        - backend
+
+### Thumbor #########################################
+    thumbor:
+      build: ./app/thumbor
+      volumes:
+        - ${DATA_PATH_HOST}/thumbor/data:/data
+        - ${DATA_PATH_HOST}/thumbor/data:/logs
+      ports:
+        - "${THUMBOR_PORT}:8000"
+      environment:
+        - THUMBOR_LOG_FORMAT=${THUMBOR_LOG_FORMAT}
+        - THUMBOR_LOG_DATE_FORMAT=${THUMBOR_LOG_DATE_FORMAT}
+        - MAX_WIDTH=${MAX_WIDTH}
+        - MAX_HEIGHT=${MAX_HEIGHT}
+        - MIN_WIDTH=${MIN_WIDTH}
+        - MIN_HEIGHT=${MIN_HEIGHT}
+        - ALLOWED_SOURCES=${ALLOWED_SOURCES}
+        - QUALITY=${QUALITY}
+        - WEBP_QUALITY=${WEBP_QUALITY}
+        - PNG_COMPRESSION_LEVEL=${PNG_COMPRESSION_LEVEL}
+        - AUTO_WEBP=${AUTO_WEBP}
+        - MAX_AGE=${MAX_AGE}
+        - MAX_AGE_TEMP_IMAGE=${MAX_AGE_TEMP_IMAGE}
+        - RESPECT_ORIENTATION=${RESPECT_ORIENTATION}
+        - IGNORE_SMART_ERRORS=${IGNORE_SMART_ERRORS}
+        - PRESERVE_EXIF_INFO=${PRESERVE_EXIF_INFO}
+        - ALLOW_ANIMATED_GIFS=${ALLOW_ANIMATED_GIFS}
+        - USE_GIFSICLE_ENGINE=${USE_GIFSICLE_ENGINE}
+        - USE_BLACKLIST=${USE_BLACKLIST}
+        - LOADER=${LOADER}
+        - STORAGE=${STORAGE}
+        - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+        - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+        - RESULT_STORAGE=${RESULT_STORAGE}
+        - ENGINE=${ENGINE}
+        - SECURITY_KEY=${SECURITY_KEY}
+        - ALLOW_UNSAFE_URL=${ALLOW_UNSAFE_URL}
+        - ALLOW_OLD_URLS=${ALLOW_OLD_URLS}
+        - FILE_LOADER_ROOT_PATH=${FILE_LOADER_ROOT_PATH}
+        - HTTP_LOADER_CONNECT_TIMEOUT=${HTTP_LOADER_CONNECT_TIMEOUT}
+        - HTTP_LOADER_REQUEST_TIMEOUT=${HTTP_LOADER_REQUEST_TIMEOUT}
+        - HTTP_LOADER_FOLLOW_REDIRECTS=${HTTP_LOADER_FOLLOW_REDIRECTS}
+        - HTTP_LOADER_MAX_REDIRECTS=${HTTP_LOADER_MAX_REDIRECTS}
+        - HTTP_LOADER_FORWARD_USER_AGENT=${HTTP_LOADER_FORWARD_USER_AGENT}
+        - HTTP_LOADER_DEFAULT_USER_AGENT=${HTTP_LOADER_DEFAULT_USER_AGENT}
+        - HTTP_LOADER_PROXY_HOST=${HTTP_LOADER_PROXY_HOST}
+        - HTTP_LOADER_PROXY_PORT=${HTTP_LOADER_PROXY_PORT}
+        - HTTP_LOADER_PROXY_USERNAME=${HTTP_LOADER_PROXY_USERNAME}
+        - HTTP_LOADER_PROXY_PASSWORD=${HTTP_LOADER_PROXY_PASSWORD}
+        - HTTP_LOADER_CA_CERTS=${HTTP_LOADER_CA_CERTS}
+        - HTTP_LOADER_VALIDATE_CERTS=${HTTP_LOADER_VALIDATE_CERTS}
+        - HTTP_LOADER_CLIENT_KEY=${HTTP_LOADER_CLIENT_KEY}
+        - HTTP_LOADER_CLIENT_CERT=${HTTP_LOADER_CLIENT_CERT}
+        - HTTP_LOADER_CURL_ASYNC_HTTP_CLIENT=${HTTP_LOADER_CURL_ASYNC_HTTP_CLIENT}
+        - STORAGE_EXPIRATION_SECONDS=${STORAGE_EXPIRATION_SECONDS}
+        - STORES_CRYPTO_KEY_FOR_EACH_IMAGE=${STORES_CRYPTO_KEY_FOR_EACH_IMAGE}
+        - FILE_STORAGE_ROOT_PATH=${FILE_STORAGE_ROOT_PATH}
+        - UPLOAD_MAX_SIZE=${UPLOAD_MAX_SIZE}
+        - UPLOAD_ENABLED=${UPLOAD_ENABLED}
+        - UPLOAD_PHOTO_STORAGE=${UPLOAD_PHOTO_STORAGE}
+        - UPLOAD_DELETE_ALLOWED=${UPLOAD_DELETE_ALLOWED}
+        - UPLOAD_PUT_ALLOWED=${UPLOAD_PUT_ALLOWED}
+        - UPLOAD_DEFAULT_FILENAME=${UPLOAD_DEFAULT_FILENAME}
+        - MONGO_STORAGE_SERVER_HOST=${MONGO_STORAGE_SERVER_HOST}
+        - MONGO_STORAGE_SERVER_PORT=${MONGO_STORAGE_SERVER_PORT}
+        - MONGO_STORAGE_SERVER_DB=${MONGO_STORAGE_SERVER_DB}
+        - MONGO_STORAGE_SERVER_COLLECTION=${MONGO_STORAGE_SERVER_COLLECTION}
+        - REDIS_STORAGE_SERVER_HOST=${REDIS_STORAGE_SERVER_HOST}
+        - REDIS_STORAGE_SERVER_PORT=${REDIS_STORAGE_SERVER_PORT}
+        - REDIS_STORAGE_SERVER_DB=${REDIS_STORAGE_SERVER_DB}
+        - REDIS_STORAGE_SERVER_PASSWORD=${REDIS_STORAGE_SERVER_PASSWORD}
+        - REDIS_RESULT_STORAGE_SERVER_HOST=${REDIS_RESULT_STORAGE_SERVER_HOST}
+        - REDIS_RESULT_STORAGE_SERVER_PORT=${REDIS_RESULT_STORAGE_SERVER_PORT}
+        - REDIS_RESULT_STORAGE_SERVER_DB=${REDIS_RESULT_STORAGE_SERVER_DB}
+        - REDIS_RESULT_STORAGE_SERVER_PASSWORD=${REDIS_RESULT_STORAGE_SERVER_PASSWORD}
+        - MEMCACHE_STORAGE_SERVERS=${MEMCACHE_STORAGE_SERVERS}
+        - MIXED_STORAGE_FILE_STORAGE=${MIXED_STORAGE_FILE_STORAGE}
+        - MIXED_STORAGE_CRYPTO_STORAGE=${MIXED_STORAGE_CRYPTO_STORAGE}
+        - MIXED_STORAGE_DETECTOR_STORAGE=${MIXED_STORAGE_DETECTOR_STORAGE}
+        - META_CALLBACK_NAME=${META_CALLBACK_NAME}
+        - DETECTORS=${DETECTORS}
+        - FACE_DETECTOR_CASCADE_FILE=${FACE_DETECTOR_CASCADE_FILE}
+        - OPTIMIZERS=${OPTIMIZERS}
+        - JPEGTRAN_PATH=${JPEGTRAN_PATH}
+        - PROGRESSIVE_JPEG=${PROGRESSIVE_JPEG}
+        - RESULT_STORAGE_EXPIRATION_SECONDS=${RESULT_STORAGE_EXPIRATION_SECONDS}
+        - RESULT_STORAGE_FILE_STORAGE_ROOT_PATH=${RESULT_STORAGE_FILE_STORAGE_ROOT_PATH}
+        - RESULT_STORAGE_STORES_UNSAFE=${RESULT_STORAGE_STORES_UNSAFE}
+        - REDIS_QUEUE_SERVER_HOST=${REDIS_QUEUE_SERVER_HOST}
+        - REDIS_QUEUE_SERVER_PORT=${REDIS_QUEUE_SERVER_PORT}
+        - REDIS_QUEUE_SERVER_DB=${REDIS_QUEUE_SERVER_DB}
+        - REDIS_QUEUE_SERVER_PASSWORD=${REDIS_QUEUE_SERVER_PASSWORD}
+        - SQS_QUEUE_KEY_ID=${SQS_QUEUE_KEY_ID}
+        - SQS_QUEUE_KEY_SECRET=${SQS_QUEUE_KEY_SECRET}
+        - SQS_QUEUE_REGION=${SQS_QUEUE_REGION}
+        - USE_CUSTOM_ERROR_HANDLING=${USE_CUSTOM_ERROR_HANDLING}
+        - ERROR_HANDLER_MODULE=${ERROR_HANDLER_MODULE}
+        - ERROR_FILE_LOGGER=${ERROR_FILE_LOGGER}
+        - ERROR_FILE_NAME_USE_CONTEXT=${ERROR_FILE_NAME_USE_CONTEXT}
+        - SENTRY_DSN_URL=${SENTRY_DSN_URL}
+        - TC_AWS_REGION=${TC_AWS_REGION}
+        - TC_AWS_ENDPOINT=${TC_AWS_ENDPOINT}
+        - TC_AWS_STORAGE_BUCKET=${TC_AWS_STORAGE_BUCKET}
+        - TC_AWS_STORAGE_ROOT_PATH=${TC_AWS_STORAGE_ROOT_PATH}
+        - TC_AWS_LOADER_BUCKET=${TC_AWS_LOADER_BUCKET}
+        - TC_AWS_LOADER_ROOT_PATH=${TC_AWS_LOADER_ROOT_PATH}
+        - TC_AWS_RESULT_STORAGE_BUCKET=${TC_AWS_RESULT_STORAGE_BUCKET}
+        - TC_AWS_RESULT_STORAGE_ROOT_PATH=${TC_AWS_RESULT_STORAGE_ROOT_PATH}
+        - TC_AWS_STORAGE_SSE=${TC_AWS_STORAGE_SSE}
+        - TC_AWS_STORAGE_RRS=${TC_AWS_STORAGE_RRS}
+        - TC_AWS_ENABLE_HTTP_LOADER=${TC_AWS_ENABLE_HTTP_LOADER}
+        - TC_AWS_ALLOWED_BUCKETS=${TC_AWS_ALLOWED_BUCKETS}
+        - TC_AWS_STORE_METADATA=${TC_AWS_STORE_METADATA}
+      networks:
+        - frontend
+        - backend
