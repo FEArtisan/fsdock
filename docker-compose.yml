@@ -138,6 +138,30 @@ services:
       depends_on:
         - elasticsearch
 
+### Logto ##############################################
+    logto:
+      build:
+        context: ./app/logto
+        args:
+          - LOGTO_VERSION=${LOGTO_VERSION}
+      entrypoint: ["sh", "-c", "npm run cli db seed -- --swe && npm start"]
+      ports:
+        - "${LOGTO_PORT}:3001"
+        - "${LOGTO_CONSOLE_PORT}:3002"
+      environment:
+        - TRUST_PROXY_HEADER=1
+        - DB_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT}/${LOGTO_POSTGRES_DB}
+        # Mandatory for GitPod to map host env to the container, thus GitPod can dynamically configure the public URL of Logto;
+        # Or, you can leverage it for local testing.
+        - ENDPOINT
+        - ADMIN_ENDPOINT
+      networks:
+        - frontend
+        - backend
+      depends_on:
+        postgres:
+          condition: service_healthy
+
 ### Kibana ##############################################
     kibana:
       build:
@@ -243,6 +267,7 @@ services:
         context: ./app/postgres
         args:
           - POSTGRES_VERSION=${POSTGRES_VERSION}
+      user: postgres
       volumes:
         - ${DATA_PATH_HOST}/postgres:/var/lib/postgresql/data
         - ${POSTGRES_ENTRYPOINT_INITDB}:/docker-entrypoint-initdb.d
@@ -252,6 +277,11 @@ services:
         - POSTGRES_DB=${POSTGRES_DB}
         - POSTGRES_USER=${POSTGRES_USER}
         - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
       networks:
         - backend
 
